@@ -1,22 +1,56 @@
 import re
-from datetime import datetime, timedelta
+import unicodedata
 
-import streamlit as st
-import pandas as pd
-from PIL import Image
 import easyocr
+import numpy as np
+import pandas as pd
+import streamlit as st
+from PIL import Image
 
 
 HOURLY_WAGE = 1250
 
-# シフト記号の退勤時刻
-SHIFT_END_MAP = {
-    "L": "21:00",
-}
+RESULT_COLUMNS = [
+    "日付",
+    "出勤",
+    "退勤",
+    "勤務時間[h]",
+    "休憩時間[h]",
+    "実働時間[h]",
+    "給料[円]",
+]
+
+
+def normalize_ocr_text(text: str) -> str:
+    text = unicodedata.normalize("NFKC", str(text))
+    return text.translate(str.maketrans({
+        "O": "0",
+        "o": "0",
+        "〇": "0",
+        "○": "0",
+    }))
+
+
+def normalize_time_token(value) -> str | None:
+    text = normalize_ocr_text(value).strip()
+    match = re.search(r"(?<!\d)([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)(?!\d)", text)
+    if not match:
+        return None
+
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+
+    return f"{hour:02d}:{minute:02d}"
 
 
 def time_to_minutes(t: str) -> int:
-    h, m = map(int, t.split(":"))
+    normalized = normalize_time_token(t)
+    if normalized is None:
+        raise ValueError(f"Invalid time: {t}")
+
+    h, m = map(int, normalized.split(":"))
     return h * 60 + m
 
 
@@ -29,33 +63,43 @@ def calc_break_minutes(work_minutes: int) -> int:
 
     if work_hours >= 10:
         return 90
-    elif work_hours >= 8:
+    if work_hours >= 8:
         return 60
-    elif work_hours >= 6:
+    if work_hours >= 6:
         return 45
-    else:
-        return 0
+    return 0
 
 
 def extract_times_from_text(text: str):
     """
-    OCR結果から 10:00, 13:30 などの時刻を抽出する
+    OCR結果から 10:00, 13.30, 1O.oo などの時刻を抽出する。
     """
-    pattern = r"\b\d{1,2}[:：]\d{2}\b"
-    times = re.findall(pattern, text)
-    times = [t.replace("：", ":") for t in times]
+    normalized_text = normalize_ocr_text(text)
+    pattern = r"(?<!\d)([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)(?!\d)"
+
+    times = []
+    for hour, minute in re.findall(pattern, normalized_text):
+        h = int(hour)
+        m = int(minute)
+        if h <= 23 and m <= 59:
+            times.append(f"{h:02d}:{m:02d}")
+
     return times
 
 
 def extract_dates_from_text(text: str):
     """
-    OCR結果から日付らしき数字を抽出する
+    OCR結果から、単独行に出た 1-31 の数字だけを日付候補として抽出する。
+    時刻の 13.30 に含まれる 13 や 30 を日付として拾わないようにする。
     """
-    nums = re.findall(r"\b\d{1,2}\b", text)
     dates = []
 
-    for n in nums:
-        value = int(n)
+    for line in text.splitlines():
+        normalized_line = normalize_ocr_text(line).strip()
+        if not re.fullmatch(r"\d{1,2}", normalized_line):
+            continue
+
+        value = int(normalized_line)
         if 1 <= value <= 31:
             dates.append(value)
 
@@ -68,7 +112,7 @@ def make_shift_table(ocr_text: str):
 
     rows = []
 
-    # 時刻は2個ずつ「出勤・退勤」として仮に割り当てる
+    # 時刻は2個ずつ「出勤・退勤」として仮に割り当てる。
     pair_count = len(times) // 2
 
     for i in range(pair_count):
@@ -82,26 +126,32 @@ def make_shift_table(ocr_text: str):
             "退勤": end,
         })
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["日付", "出勤", "退勤"])
 
 
 def calculate_salary(df: pd.DataFrame, hourly_wage: int):
     result_rows = []
 
     for _, row in df.iterrows():
-        date = row["日付"]
-        start = str(row["出勤"])
-        end = str(row["退勤"])
+        date = row.get("日付")
+        start = normalize_time_token(row.get("出勤"))
+        end = normalize_time_token(row.get("退勤"))
 
-        if not start or not end or start == "nan" or end == "nan":
+        if start is None or end is None:
             continue
 
         start_min = time_to_minutes(start)
         end_min = time_to_minutes(end)
 
+        if end_min <= start_min:
+            end_min += 24 * 60
+
         work_minutes = end_min - start_min
         break_minutes = calc_break_minutes(work_minutes)
         actual_minutes = work_minutes - break_minutes
+
+        if actual_minutes <= 0:
+            continue
 
         pay = actual_minutes / 60 * hourly_wage
 
@@ -115,7 +165,7 @@ def calculate_salary(df: pd.DataFrame, hourly_wage: int):
             "給料[円]": round(pay),
         })
 
-    result_df = pd.DataFrame(result_rows)
+    result_df = pd.DataFrame(result_rows, columns=RESULT_COLUMNS)
 
     total_hours = result_df["実働時間[h]"].sum()
     total_pay = result_df["給料[円]"].sum()
@@ -144,7 +194,7 @@ if uploaded_file is not None:
     st.image(image, caption="アップロード画像", use_container_width=True)
 
     reader = easyocr.Reader(["ja", "en"], gpu=False)
-    ocr_result = reader.readtext(image)
+    ocr_result = reader.readtext(np.array(image.convert("RGB")))
 
     ocr_text = "\n".join([item[1] for item in ocr_result])
 
@@ -169,7 +219,11 @@ if uploaded_file is not None:
         )
 
         st.subheader("計算結果")
-        st.dataframe(result_df, use_container_width=True)
+
+        if result_df.empty:
+            st.warning("計算できるシフトがありません。出勤・退勤が 10:00 の形式になっているか確認してください。")
+        else:
+            st.dataframe(result_df, use_container_width=True)
 
         st.metric("実働時間合計", f"{total_hours:.2f} 時間")
-        st.metric("給料合計", f"{total_pay:,} 円")
+        st.metric("給料合計", f"{total_pay:,.0f} 円")
