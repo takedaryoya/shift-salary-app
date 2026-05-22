@@ -10,6 +10,10 @@ from PIL import Image
 
 HOURLY_WAGE = 1250
 
+SHIFT_END_MAP = {
+    "L": "21:00",
+}
+
 SHIFT_COLUMNS = ["日付", "出勤", "退勤"]
 RESULT_COLUMNS = [
     "日付",
@@ -58,6 +62,129 @@ def normalize_times_for_display(text: str) -> str:
         return f"{hour:02d}:{minute:02d}"
 
     return re.sub(pattern, replace_time, normalized_text)
+
+
+def bbox_center(bbox):
+    xs = [point[0] for point in bbox]
+    ys = [point[1] for point in bbox]
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
+def bbox_bounds(bbox):
+    xs = [point[0] for point in bbox]
+    ys = [point[1] for point in bbox]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def extract_times_with_positions(text: str, bbox):
+    times = extract_times_from_text(text)
+    if not times:
+        return []
+
+    x1, y1, x2, y2 = bbox_bounds(bbox)
+    center_x = (x1 + x2) / 2
+    height = y2 - y1
+
+    positioned_times = []
+    for i, time_text in enumerate(times):
+        if len(times) == 1:
+            center_y = (y1 + y2) / 2
+        else:
+            center_y = y1 + height * (i + 1) / (len(times) + 1)
+
+        positioned_times.append({
+            "text": time_text,
+            "x": center_x,
+            "y": center_y,
+        })
+
+    return positioned_times
+
+
+def extract_l_symbol_with_position(text: str, bbox):
+    normalized_text = normalize_ocr_text(text).strip().upper()
+    if normalized_text != "L":
+        return None
+
+    center_x, center_y = bbox_center(bbox)
+    return {
+        "text": "L",
+        "x": center_x,
+        "y": center_y,
+    }
+
+
+def make_shift_table_from_ocr_result(ocr_result, image_size):
+    image_width, image_height = image_size
+    date_positions = []
+    shift_tokens = []
+
+    for item in ocr_result:
+        bbox, text = item[0], item[1]
+        normalized_text = normalize_ocr_text(text).strip()
+        center_x, center_y = bbox_center(bbox)
+
+        if center_y > image_height * 0.08 and re.fullmatch(r"\d{1,2}", normalized_text):
+            date = int(normalized_text)
+            if 1 <= date <= 31:
+                date_positions.append({
+                    "date": date,
+                    "side": "left" if center_x < image_width / 2 else "right",
+                    "x": center_x,
+                    "y": center_y,
+                })
+
+        shift_tokens.extend(extract_times_with_positions(text, bbox))
+
+        l_symbol = extract_l_symbol_with_position(text, bbox)
+        if l_symbol is not None:
+            shift_tokens.append(l_symbol)
+
+    if not date_positions:
+        return pd.DataFrame(columns=SHIFT_COLUMNS)
+
+    rows_by_date = {}
+    for token in shift_tokens:
+        side = "left" if token["x"] < image_width / 2 else "right"
+        candidates = [date for date in date_positions if date["side"] == side]
+        if not candidates:
+            continue
+
+        nearest_date = min(candidates, key=lambda date: abs(date["y"] - token["y"]))
+        rows_by_date.setdefault(nearest_date["date"], []).append(token)
+
+    rows = []
+    for date, tokens in sorted(rows_by_date.items()):
+        times = [
+            token["text"]
+            for token in sorted(tokens, key=lambda token: token["y"])
+            if normalize_time_token(token["text"]) is not None
+        ]
+        symbols = {
+            token["text"]
+            for token in tokens
+            if normalize_ocr_text(token["text"]).strip().upper() in SHIFT_END_MAP
+        }
+
+        if len(times) >= 2:
+            start = times[0]
+            end = times[-1]
+        elif len(times) == 1 and symbols:
+            start = times[0]
+            end = SHIFT_END_MAP[sorted(symbols)[0]]
+        elif len(times) == 1:
+            start = times[0]
+            end = None
+        else:
+            continue
+
+        rows.append({
+            "日付": date,
+            "出勤": start,
+            "退勤": end,
+        })
+
+    return pd.DataFrame(rows, columns=SHIFT_COLUMNS)
 
 
 def time_to_minutes(t: str) -> int:
@@ -218,7 +345,9 @@ if uploaded_file is not None:
     st.caption("O/o の 0 誤読、13.30 のような時刻表記は自動補正しています。必要ならここで直接修正してください。")
     edited_ocr_text = st.text_area("読み取った文字（修正可）", normalized_ocr_text, height=240)
 
-    df = make_shift_table(edited_ocr_text)
+    df = make_shift_table_from_ocr_result(ocr_result, image.size)
+    if df.empty:
+        df = make_shift_table(edited_ocr_text)
 
     st.subheader("読み取り後のシフト表")
     st.write("OCRは誤読する場合があるため、必要に応じて日付・出勤・退勤を修正する。")
