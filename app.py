@@ -1,7 +1,6 @@
 import re
 import unicodedata
 
-import easyocr
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -24,6 +23,13 @@ RESULT_COLUMNS = [
     "実働時間[h]",
     "給料[円]",
 ]
+
+
+@st.cache_resource
+def get_ocr_reader():
+    import easyocr
+
+    return easyocr.Reader(["ja", "en"], gpu=False)
 
 
 def normalize_ocr_text(text: str) -> str:
@@ -393,8 +399,14 @@ if uploaded_file is not None:
     image = Image.open(uploaded_file)
     st.image(image, caption="アップロード画像", use_container_width=True)
 
-    reader = easyocr.Reader(["ja", "en"], gpu=False)
-    ocr_result = reader.readtext(np.array(image.convert("RGB")))
+    try:
+        with st.spinner("OCRで読み取り中..."):
+            reader = get_ocr_reader()
+            ocr_result = reader.readtext(np.array(image.convert("RGB")))
+    except Exception as exc:
+        st.error("OCRの読み取り中にエラーが発生しました。")
+        st.exception(exc)
+        st.stop()
 
     raw_ocr_text = "\n".join([item[1] for item in ocr_result])
     normalized_ocr_text = normalize_times_for_display(raw_ocr_text)
