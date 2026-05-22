@@ -114,44 +114,102 @@ def extract_l_symbol_with_position(text: str, bbox):
     }
 
 
-def make_shift_table_from_ocr_result(ocr_result, image_size):
+def estimate_row_geometry(ocr_result, image_size):
     image_width, image_height = image_size
-    date_positions = []
-    shift_tokens = []
+    date_points = []
 
     for item in ocr_result:
         bbox, text = item[0], item[1]
         normalized_text = normalize_ocr_text(text).strip()
+        if not re.fullmatch(r"\d{1,2}", normalized_text):
+            continue
+
+        date = int(normalized_text)
+        if not 1 <= date <= 31:
+            continue
+
         center_x, center_y = bbox_center(bbox)
+        if center_y < image_height * 0.08:
+            continue
 
-        if center_y > image_height * 0.08 and re.fullmatch(r"\d{1,2}", normalized_text):
-            date = int(normalized_text)
-            if 1 <= date <= 31:
-                date_positions.append({
-                    "date": date,
-                    "side": "left" if center_x < image_width / 2 else "right",
-                    "x": center_x,
-                    "y": center_y,
-                })
+        if center_x < image_width / 2 and date <= 15:
+            date_points.append((date - 1, center_y))
+        elif center_x >= image_width / 2 and date >= 16:
+            date_points.append((date - 16, center_y))
 
+    row_height = image_height * 0.0565
+    if len(date_points) >= 2:
+        slopes = []
+        for i, (row_a, y_a) in enumerate(date_points):
+            for row_b, y_b in date_points[i + 1:]:
+                if row_a != row_b:
+                    slopes.append(abs((y_b - y_a) / (row_b - row_a)))
+        useful_slopes = [
+            slope
+            for slope in slopes
+            if image_height * 0.035 <= slope <= image_height * 0.08
+        ]
+        if useful_slopes:
+            row_height = float(np.median(useful_slopes))
+
+    if date_points:
+        first_row_center = float(np.median([
+            center_y - row_index * row_height
+            for row_index, center_y in date_points
+        ]))
+    else:
+        first_row_center = image_height * 0.112
+
+    return first_row_center, row_height
+
+
+def get_layout_shift_side(x: float, image_width: int) -> str | None:
+    left_shift_start = image_width * 0.30
+    left_shift_end = image_width * 0.51
+    right_shift_start = image_width * 0.69
+    right_shift_end = image_width * 0.90
+
+    if left_shift_start <= x <= left_shift_end:
+        return "left"
+    if right_shift_start <= x <= right_shift_end:
+        return "right"
+    return None
+
+
+def make_shift_table_from_ocr_result(ocr_result, image_size):
+    image_width, image_height = image_size
+    first_row_center, row_height = estimate_row_geometry(ocr_result, image_size)
+    shift_tokens = []
+
+    for item in ocr_result:
+        bbox, text = item[0], item[1]
         shift_tokens.extend(extract_times_with_positions(text, bbox))
 
         l_symbol = extract_l_symbol_with_position(text, bbox)
         if l_symbol is not None:
             shift_tokens.append(l_symbol)
 
-    if not date_positions:
-        return pd.DataFrame(columns=SHIFT_COLUMNS)
-
     rows_by_date = {}
     for token in shift_tokens:
-        side = "left" if token["x"] < image_width / 2 else "right"
-        candidates = [date for date in date_positions if date["side"] == side]
-        if not candidates:
+        side = get_layout_shift_side(token["x"], image_width)
+        if side is None:
             continue
 
-        nearest_date = min(candidates, key=lambda date: abs(date["y"] - token["y"]))
-        rows_by_date.setdefault(nearest_date["date"], []).append(token)
+        row_index = round((token["y"] - first_row_center) / row_height)
+        row_center_y = first_row_center + row_index * row_height
+        if abs(token["y"] - row_center_y) > row_height * 0.48:
+            continue
+
+        if side == "left":
+            if not 0 <= row_index <= 14:
+                continue
+            date = row_index + 1
+        else:
+            if not 0 <= row_index <= 15:
+                continue
+            date = row_index + 16
+
+        rows_by_date.setdefault(date, []).append(token)
 
     rows = []
     for date, tokens in sorted(rows_by_date.items()):
