@@ -397,7 +397,7 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
-    st.image(image, caption="アップロード画像", use_container_width=True)
+    st.image(image, caption="アップロード画像", width="stretch")
 
     try:
         with st.spinner("OCRで読み取り中..."):
@@ -425,7 +425,7 @@ if uploaded_file is not None:
     edited_df = st.data_editor(
         df,
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
     )
 
     if st.button("給料を計算"):
@@ -439,7 +439,7 @@ if uploaded_file is not None:
         if result_df.empty:
             st.warning("計算できるシフトがありません。出勤・退勤が 10:00 の形式になっているか確認してください。")
         else:
-            st.dataframe(result_df, use_container_width=True)
+            st.dataframe(result_df, width="stretch")
 
         st.metric("実働時間合計", f"{total_hours:.2f} 時間")
         st.metric("給料合計", f"{total_pay:,.0f} 円")
