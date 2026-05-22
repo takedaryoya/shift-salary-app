@@ -1,0 +1,7 @@
+streamlit
+pandas
+pillow
+easyocr
+opencv-python
+torch
+torchvision
