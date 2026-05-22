@@ -10,6 +10,7 @@ from PIL import Image
 
 HOURLY_WAGE = 1250
 
+SHIFT_COLUMNS = ["日付", "出勤", "退勤"]
 RESULT_COLUMNS = [
     "日付",
     "出勤",
@@ -43,6 +44,20 @@ def normalize_time_token(value) -> str | None:
         return None
 
     return f"{hour:02d}:{minute:02d}"
+
+
+def normalize_times_for_display(text: str) -> str:
+    normalized_text = normalize_ocr_text(text)
+    pattern = r"(?<!\d)([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)(?!\d)"
+
+    def replace_time(match: re.Match) -> str:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if hour > 23 or minute > 59:
+            return match.group(0)
+        return f"{hour:02d}:{minute:02d}"
+
+    return re.sub(pattern, replace_time, normalized_text)
 
 
 def time_to_minutes(t: str) -> int:
@@ -126,7 +141,7 @@ def make_shift_table(ocr_text: str):
             "退勤": end,
         })
 
-    return pd.DataFrame(rows, columns=["日付", "出勤", "退勤"])
+    return pd.DataFrame(rows, columns=SHIFT_COLUMNS)
 
 
 def calculate_salary(df: pd.DataFrame, hourly_wage: int):
@@ -196,15 +211,17 @@ if uploaded_file is not None:
     reader = easyocr.Reader(["ja", "en"], gpu=False)
     ocr_result = reader.readtext(np.array(image.convert("RGB")))
 
-    ocr_text = "\n".join([item[1] for item in ocr_result])
+    raw_ocr_text = "\n".join([item[1] for item in ocr_result])
+    normalized_ocr_text = normalize_times_for_display(raw_ocr_text)
 
     st.subheader("OCR読み取り結果")
-    st.text_area("読み取った文字", ocr_text, height=200)
+    st.caption("O/o の 0 誤読、13.30 のような時刻表記は自動補正しています。必要ならここで直接修正してください。")
+    edited_ocr_text = st.text_area("読み取った文字（修正可）", normalized_ocr_text, height=240)
 
-    df = make_shift_table(ocr_text)
+    df = make_shift_table(edited_ocr_text)
 
     st.subheader("読み取り後のシフト表")
-    st.write("OCRは誤読する場合があるため、必要に応じて修正する。")
+    st.write("OCRは誤読する場合があるため、必要に応じて日付・出勤・退勤を修正する。")
 
     edited_df = st.data_editor(
         df,
