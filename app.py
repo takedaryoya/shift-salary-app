@@ -52,6 +52,10 @@ def normalize_ocr_text(text: str) -> str:
 
 def normalize_time_token(value) -> str | None:
     text = normalize_ocr_text(value).strip()
+    shift_symbol = text.upper()
+    if shift_symbol in SHIFT_END_MAP:
+        return SHIFT_END_MAP[shift_symbol]
+
     match = re.search(r"(?<!\d)([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)(?!\d)", text)
     if not match:
         return None
