@@ -68,6 +68,11 @@ def normalize_time_token(value) -> str | None:
     return f"{hour:02d}:{minute:02d}"
 
 
+def is_shift_end_symbol(value) -> bool:
+    text = normalize_ocr_text(value).strip().upper()
+    return text in SHIFT_END_MAP
+
+
 def normalize_times_for_display(text: str) -> str:
     normalized_text = normalize_ocr_text(text)
     pattern = r"(?<!\d)([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)(?!\d)"
@@ -232,14 +237,15 @@ def make_shift_table_from_ocr_result(ocr_result, image_size):
     rows = []
     for date, tokens in sorted(rows_by_date.items()):
         times = [
-            token["text"]
+            normalize_time_token(token["text"])
             for token in sorted(tokens, key=lambda token: token["y"])
-            if normalize_time_token(token["text"]) is not None
+            if not is_shift_end_symbol(token["text"])
+            and normalize_time_token(token["text"]) is not None
         ]
         symbols = {
-            token["text"]
+            normalize_ocr_text(token["text"]).strip().upper()
             for token in tokens
-            if normalize_ocr_text(token["text"]).strip().upper() in SHIFT_END_MAP
+            if is_shift_end_symbol(token["text"])
         }
 
         if len(times) >= 2:
@@ -250,7 +256,8 @@ def make_shift_table_from_ocr_result(ocr_result, image_size):
             end = SHIFT_END_MAP[sorted(symbols)[0]]
         elif len(times) == 1:
             start = times[0]
-            end = None
+            # この帳票では退勤時刻が文字 "L" の場合があり、OCRが文字だけ落とすことがある。
+            end = SHIFT_END_MAP["L"]
         else:
             continue
 
@@ -454,7 +461,7 @@ if uploaded_file:
         df = pd.DataFrame(columns=SHIFT_COLUMNS)
 
     st.subheader("読み取り後のシフト表")
-    st.write("画像ごとの読み取り結果です。必要に応じて日付・出勤・退勤を修正する。")
+    st.write("画像ごとの読み取り結果です。退勤の L は 21:00 として補完します。必要に応じて日付・出勤・退勤を修正する。")
 
     edited_df = st.data_editor(
         df,
