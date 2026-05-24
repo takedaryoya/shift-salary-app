@@ -1,3 +1,4 @@
+import io
 import re
 import unicodedata
 
@@ -13,8 +14,9 @@ SHIFT_END_MAP = {
     "L": "21:00",
 }
 
-SHIFT_COLUMNS = ["日付", "出勤", "退勤"]
+SHIFT_COLUMNS = ["画像", "日付", "出勤", "退勤"]
 RESULT_COLUMNS = [
+    "画像",
     "日付",
     "出勤",
     "退勤",
@@ -30,6 +32,12 @@ def get_ocr_reader():
     import easyocr
 
     return easyocr.Reader(["ja", "en"], gpu=False)
+
+
+@st.cache_data(show_spinner=False)
+def read_ocr_result(image_bytes: bytes):
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    return get_ocr_reader().readtext(np.array(image))
 
 
 def normalize_ocr_text(text: str) -> str:
@@ -243,6 +251,7 @@ def make_shift_table_from_ocr_result(ocr_result, image_size):
             continue
 
         rows.append({
+            "画像": None,
             "日付": date,
             "出勤": start,
             "退勤": end,
@@ -327,6 +336,7 @@ def make_shift_table(ocr_text: str):
         end = times[2 * i + 1]
 
         rows.append({
+            "画像": None,
             "日付": date,
             "出勤": start,
             "退勤": end,
@@ -339,6 +349,7 @@ def calculate_salary(df: pd.DataFrame, hourly_wage: int):
     result_rows = []
 
     for _, row in df.iterrows():
+        source_image = row.get("画像")
         date = row.get("日付")
         start = normalize_time_token(row.get("出勤"))
         end = normalize_time_token(row.get("退勤"))
@@ -362,6 +373,7 @@ def calculate_salary(df: pd.DataFrame, hourly_wage: int):
         pay = actual_minutes / 60 * hourly_wage
 
         result_rows.append({
+            "画像": source_image,
             "日付": date,
             "出勤": start,
             "退勤": end,
@@ -391,36 +403,54 @@ hourly_wage = st.number_input(
 )
 
 uploaded_file = st.file_uploader(
-    "シフト表画像をアップロード",
+    "シフト表画像をアップロード（複数選択可）",
     type=["jpg", "jpeg", "png"],
+    accept_multiple_files=True,
 )
 
-if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    st.image(image, caption="アップロード画像", width="stretch")
+if uploaded_file:
+    parsed_tables = []
 
-    try:
-        with st.spinner("OCRで読み取り中..."):
-            reader = get_ocr_reader()
-            ocr_result = reader.readtext(np.array(image.convert("RGB")))
-    except Exception as exc:
-        st.error("OCRの読み取り中にエラーが発生しました。")
-        st.exception(exc)
-        st.stop()
+    st.subheader("アップロード画像とOCR読み取り結果")
+    st.caption("O/o の 0 誤読、13.30 のような時刻表記は自動補正しています。")
 
-    raw_ocr_text = "\n".join([item[1] for item in ocr_result])
-    normalized_ocr_text = normalize_times_for_display(raw_ocr_text)
+    for index, file in enumerate(uploaded_file):
+        file_bytes = file.getvalue()
+        image = Image.open(io.BytesIO(file_bytes))
 
-    st.subheader("OCR読み取り結果")
-    st.caption("O/o の 0 誤読、13.30 のような時刻表記は自動補正しています。必要ならここで直接修正してください。")
-    edited_ocr_text = st.text_area("読み取った文字（修正可）", normalized_ocr_text, height=240)
+        with st.expander(file.name, expanded=len(uploaded_file) == 1):
+            st.image(image, caption=file.name, width="stretch")
 
-    df = make_shift_table_from_ocr_result(ocr_result, image.size)
-    if df.empty:
-        df = make_shift_table(edited_ocr_text)
+            try:
+                with st.spinner("OCRで読み取り中..."):
+                    ocr_result = read_ocr_result(file_bytes)
+            except Exception as exc:
+                st.error("OCRの読み取り中にエラーが発生しました。")
+                st.exception(exc)
+                continue
+
+            raw_ocr_text = "\n".join([item[1] for item in ocr_result])
+            normalized_ocr_text = normalize_times_for_display(raw_ocr_text)
+            edited_ocr_text = st.text_area(
+                "読み取った文字（修正可）",
+                normalized_ocr_text,
+                height=200,
+                key=f"ocr_text_{index}_{file.name}",
+            )
+
+            image_df = make_shift_table_from_ocr_result(ocr_result, image.size)
+            if image_df.empty:
+                image_df = make_shift_table(edited_ocr_text)
+            image_df["画像"] = file.name
+            parsed_tables.append(image_df[SHIFT_COLUMNS])
+
+    if parsed_tables:
+        df = pd.concat(parsed_tables, ignore_index=True)
+    else:
+        df = pd.DataFrame(columns=SHIFT_COLUMNS)
 
     st.subheader("読み取り後のシフト表")
-    st.write("OCRは誤読する場合があるため、必要に応じて日付・出勤・退勤を修正する。")
+    st.write("画像ごとの読み取り結果です。必要に応じて日付・出勤・退勤を修正する。")
 
     edited_df = st.data_editor(
         df,
