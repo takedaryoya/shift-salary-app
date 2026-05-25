@@ -26,6 +26,8 @@ RESULT_COLUMNS = [
     "給料[円]",
 ]
 
+TIME_PATTERN = r"([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)"
+
 
 @st.cache_resource
 def get_ocr_reader():
@@ -66,7 +68,7 @@ def normalize_time_token(value) -> str | None:
     if shift_symbol in SHIFT_END_MAP:
         return SHIFT_END_MAP[shift_symbol]
 
-    match = re.search(r"(?<!\d)([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)(?!\d)", text)
+    match = re.search(TIME_PATTERN, text)
     if not match:
         return None
 
@@ -85,7 +87,6 @@ def is_shift_end_symbol(value) -> bool:
 
 def normalize_times_for_display(text: str) -> str:
     normalized_text = repair_ocr_time_text(text)
-    pattern = r"(?<!\d)([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)(?!\d)"
 
     def replace_time(match: re.Match) -> str:
         hour = int(match.group(1))
@@ -94,7 +95,7 @@ def normalize_times_for_display(text: str) -> str:
             return match.group(0)
         return f"{hour:02d}:{minute:02d}"
 
-    return re.sub(pattern, replace_time, normalized_text)
+    return re.sub(TIME_PATTERN, replace_time, normalized_text)
 
 
 def bbox_center(bbox):
@@ -259,8 +260,9 @@ def make_shift_table_from_ocr_result(ocr_result, image_size):
         }
 
         if len(times) >= 2:
-            start = times[0]
-            end = times[-1]
+            sorted_times = sorted(times, key=time_to_minutes)
+            start = sorted_times[0]
+            end = sorted_times[-1]
         elif len(times) == 1 and symbols:
             start = times[0]
             end = SHIFT_END_MAP[sorted(symbols)[0]]
@@ -309,12 +311,12 @@ def calc_break_minutes(work_minutes: int) -> int:
 def extract_times_from_text(text: str):
     """
     OCR結果から 10:00, 13.30, 1O.oo などの時刻を抽出する。
+    横並びのセルが 13.0013.00 のように連結された場合も両方抽出する。
     """
     normalized_text = repair_ocr_time_text(text)
-    pattern = r"(?<!\d)([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)(?!\d)"
 
     times = []
-    for hour, minute in re.findall(pattern, normalized_text):
+    for hour, minute in re.findall(TIME_PATTERN, normalized_text):
         h = int(hour)
         m = int(minute)
         if h <= 23 and m <= 59:
