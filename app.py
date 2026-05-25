@@ -50,8 +50,18 @@ def normalize_ocr_text(text: str) -> str:
     }))
 
 
+def repair_ocr_time_text(text: str) -> str:
+    text = normalize_ocr_text(text)
+    # OCR can read the leading 2 in "20:00" as z/Z and leave an extra zero.
+    return re.sub(
+        r"(?<![A-Za-z0-9])[zZ]\s*0{1,2}\s*[:：.．。]\s*00(?!\d)",
+        "20:00",
+        text,
+    )
+
+
 def normalize_time_token(value) -> str | None:
-    text = normalize_ocr_text(value).strip()
+    text = repair_ocr_time_text(value).strip()
     shift_symbol = text.upper()
     if shift_symbol in SHIFT_END_MAP:
         return SHIFT_END_MAP[shift_symbol]
@@ -74,7 +84,7 @@ def is_shift_end_symbol(value) -> bool:
 
 
 def normalize_times_for_display(text: str) -> str:
-    normalized_text = normalize_ocr_text(text)
+    normalized_text = repair_ocr_time_text(text)
     pattern = r"(?<!\d)([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)(?!\d)"
 
     def replace_time(match: re.Match) -> str:
@@ -300,7 +310,7 @@ def extract_times_from_text(text: str):
     """
     OCR結果から 10:00, 13.30, 1O.oo などの時刻を抽出する。
     """
-    normalized_text = normalize_ocr_text(text)
+    normalized_text = repair_ocr_time_text(text)
     pattern = r"(?<!\d)([0-2]?\d)\s*[:：.．。]\s*([0-5]\d)(?!\d)"
 
     times = []
@@ -423,7 +433,7 @@ if uploaded_file:
     parsed_tables = []
 
     st.subheader("アップロード画像とOCR読み取り結果")
-    st.caption("O/o の 0 誤読、13.30 のような時刻表記は自動補正しています。")
+    st.caption("O/o の 0 誤読、z00:00、13.30 のような時刻表記は自動補正しています。")
 
     for index, file in enumerate(uploaded_file):
         file_bytes = file.getvalue()
